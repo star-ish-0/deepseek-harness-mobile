@@ -3,13 +3,16 @@
 # O que este workflow faz:
 #   1. Baixa o rootfs (o "motor" dsh, Debian+Node) de dsh-io/dsh-arm64
 #      — por padrão PINADO na v0.1.0-rc.6 com verificação de SHA-256.
-#   2. Empacota o proot dos repositórios oficiais do Termux.
-#   3. GERA UMA CHAVE DE ASSINATURA EFÊMERA (keytool) a cada execução —
+#   2. GERA UMA CHAVE DE ASSINATURA EFÊMERA (keytool) a cada execução —
 #      é a versão "fds a assinatura" que realmente instala: sem keystore,
 #      o assembleRelease produz um APK unsigned que o Android recusa.
-#   4. Roda os testes unitários e monta o APK release assinado.
-#   5. Publica como prerelease no SEU fork — dá pra baixar direto do
-#      celular pela aba Releases.
+#   3. Roda os testes unitários (JVM/Robolectric) e locais JS/C.
+#   4. Empacota o proot dos repositórios oficiais do Termux — SOMENTE
+#      DEPOIS dos testes: EngineManagerTest/ProotRuntimeTest cobrem os
+#      caminhos de FALHA da extração e assumem que os assets proot/arm64-v8a
+#      NÃO existem no ambiente JVM (Robolectric serve src/main/assets).
+#   5. Monta o APK release assinado e publica como prerelease no SEU fork
+#      — dá pra baixar direto do celular pela aba Releases.
 #
 # ⚠️ Consequência da chave efêmera: cada build tem uma assinatura diferente.
 #    Pra instalar um build novo sobre um antigo, DESINSTALE o anterior
@@ -84,7 +87,34 @@ jobs:
         run: |
           echo "${{ inputs.rootfs_sha256 }}  app/src/main/assets/rootfs.tar.xz" | sha256sum -c -
 
-      # ── 2. Proot + libs dos repositórios oficiais do Termux ─────────────
+      # ── 2. Chave de assinatura efêmera (alias/senhas = defaults que o
+      #        build.gradle.kts do projeto já espera: release/android) ─────
+      - name: Generate ephemeral signing key
+        run: |
+          keytool -genkeypair -v \
+            -keystore release.keystore -alias release \
+            -storepass android -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=dsh-fork-build"
+
+      # ── 3. Testes — com assets/proot AUSENTE (o passo 4 depende disso) ──
+      - name: Run JVM unit tests
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest
+
+      - name: Run local JS/C tests
+        run: ./tests/run-local.sh
+
+      # ── 4. Proot + libs dos repositórios oficiais do Termux ─────────────
+      # DEPOIS dos testes, de propósito (mesma ordem do release.yml
+      # upstream): os testes de extração cobrem caminhos de FALHA e
+      # assumem que proot/arm64-v8a NÃO existe em src/main/assets — o
+      # Robolectric serve esse diretório nos testes JVM. Se este passo
+      # rodar antes, ensureProot() extrai os assets reais e os testes
+      # "startEngine fails without proot assets" e "ensureProot requires
+      # the shared libs too" quebram. O rootfs.tar.xz não interfere
+      # (nenhum teste o lê — comprovado pelo CI verde no mesmo commit).
       - name: Package proot runtime (arm64)
         run: |
           # Resolve os caminhos dos .deb pelo índice APT em vez de pinar
@@ -119,25 +149,6 @@ jobs:
           readelf --dyn-syms proot | grep -q talloc || { echo "proot missing talloc ref"; exit 1; }
           mkdir -p "$GITHUB_WORKSPACE/app/src/main/assets/proot/arm64-v8a"
           cp proot libtalloc.so.2 libandroid-shmem.so "$GITHUB_WORKSPACE/app/src/main/assets/proot/arm64-v8a/"
-
-      # ── 3. Chave de assinatura efêmera (alias/senhas = defaults que o
-      #        build.gradle.kts do projeto já espera: release/android) ─────
-      - name: Generate ephemeral signing key
-        run: |
-          keytool -genkeypair -v \
-            -keystore release.keystore -alias release \
-            -storepass android -keypass android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=dsh-fork-build"
-
-      # ── 4. Testes + build ────────────────────────────────────────────────
-      - name: Run JVM unit tests
-        run: |
-          chmod +x gradlew
-          ./gradlew testDebugUnitTest
-
-      - name: Run local JS/C tests
-        run: ./tests/run-local.sh
 
       - name: Build release APK
         run: |
