@@ -1,0 +1,152 @@
+# Build do deepseek-harness-mobile no SEU fork — zero secrets, zero configuração.
+#
+# O que este workflow faz:
+#   1. Baixa o rootfs (o "motor" dsh, Debian+Node) de dsh-io/dsh-arm64
+#      — por padrão PINADO na v0.1.0-rc.6 com verificação de SHA-256.
+#   2. Empacota o proot dos repositórios oficiais do Termux.
+#   3. GERA UMA CHAVE DE ASSINATURA EFÊMERA (keytool) a cada execução —
+#      é a versão "fds a assinatura" que realmente instala: sem keystore,
+#      o assembleRelease produz um APK unsigned que o Android recusa.
+#   4. Roda os testes unitários e monta o APK release assinado.
+#   5. Publica como prerelease no SEU fork — dá pra baixar direto do
+#      celular pela aba Releases.
+#
+# ⚠️ Consequência da chave efêmera: cada build tem uma assinatura diferente.
+#    Pra instalar um build novo sobre um antigo, DESINSTALE o anterior
+#    antes (senão o Android bloqueia por "signature mismatch").
+#    Se um dia quiser assinatura estável sem secrets: gere um
+#    release.keystore com keytool e comite no repo — o build.gradle.kts
+#    do projeto já o detecta automaticamente na raiz.
+
+name: Build DSH APK (fork)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rootfs_tag:
+        description: 'Tag do rootfs em dsh-io/dsh-arm64 (vazio = latest)'
+        required: false
+        default: 'v0.1.0-rc.6'
+      rootfs_sha256:
+        description: 'SHA-256 esperado do rootfs (vazio = não verificar)'
+        required: false
+        default: '53ecb5be190a8cc4c2e594de202e13355b4c2e2673c34c7f65a6337dba752f20'
+
+permissions:
+  contents: write # necessário apenas para criar a prerelease com o APK
+
+jobs:
+  build:
+    name: Build signed APK (arm64-v8a)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4.0.1
+        with:
+          packages: 'platforms;android-36 platform-tools build-tools;36.0.0'
+          accept-android-sdk-licenses: 'true'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6.3.0
+
+      - name: Resolve version
+        id: ver
+        run: |
+          echo "version_name=0.2.0-fork" >> "$GITHUB_OUTPUT"
+          echo "version_code=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          echo "tag=build-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      # ── 1. Rootfs (motor dsh: Debian bookworm + Node + dsh) ──────────────
+      - name: Download rootfs from dsh-io/dsh-arm64
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p app/src/main/assets
+          TAG="${{ inputs.rootfs_tag }}"
+          if [ -n "$TAG" ]; then EP="releases/tags/$TAG"; else EP="releases/latest"; fi
+          asset_url=$(gh api "repos/dsh-io/dsh-arm64/$EP" \
+            --jq '.assets[] | select(.name | startswith("dsh-arm64-rootfs-")) | .url' | head -1)
+          [ -n "$asset_url" ] || { echo "rootfs asset not found in dsh-io/dsh-arm64 ($EP)"; exit 1; }
+          curl -sfL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" \
+            "$asset_url" -o app/src/main/assets/rootfs.tar.xz
+          ls -lh app/src/main/assets/rootfs.tar.xz
+
+      - name: Verify rootfs SHA-256
+        if: ${{ inputs.rootfs_sha256 != '' }}
+        run: |
+          echo "${{ inputs.rootfs_sha256 }}  app/src/main/assets/rootfs.tar.xz" | sha256sum -c -
+
+      # ── 2. Proot + libs dos repositórios oficiais do Termux ─────────────
+      - name: Package proot runtime (arm64)
+        run: |
+          ABI=aarch64
+          BASE="https://packages.termux.dev/apt/termux-main/pool/main"
+          mkdir -p /tmp/proot && cd /tmp/proot
+          curl -sfL -o proot.deb "$BASE/p/proot/proot_5.1.107.91_${ABI}.deb"
+          curl -sfL -o talloc.deb "$BASE/libt/libtalloc/libtalloc_2.4.3_${ABI}.deb"
+          curl -sfL -o shmem.deb "$BASE/liba/libandroid-shmem/libandroid-shmem_0.7_${ABI}.deb"
+          mkdir -p x && for d in proot talloc shmem; do
+            ar x $d.deb && tar -xf data.tar.xz -C x && rm -f data.tar.xz
+          done
+          P=x/data/data/com.termux/files
+          cp "$P/usr/bin/proot" . && cp "$P/usr/lib/libtalloc.so.2" "$P/usr/lib/libandroid-shmem.so" .
+          file proot | grep -q ELF || { echo "proot not ELF"; exit 1; }
+          readelf --dyn-syms proot | grep -q talloc || { echo "proot missing talloc ref"; exit 1; }
+          mkdir -p "$GITHUB_WORKSPACE/app/src/main/assets/proot/arm64-v8a"
+          cp proot libtalloc.so.2 libandroid-shmem.so "$GITHUB_WORKSPACE/app/src/main/assets/proot/arm64-v8a/"
+
+      # ── 3. Chave de assinatura efêmera (alias/senhas = defaults que o
+      #        build.gradle.kts do projeto já espera: release/android) ─────
+      - name: Generate ephemeral signing key
+        run: |
+          keytool -genkeypair -v \
+            -keystore release.keystore -alias release \
+            -storepass android -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=dsh-fork-build"
+
+      # ── 4. Testes + build ────────────────────────────────────────────────
+      - name: Run JVM unit tests
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest
+
+      - name: Run local JS/C tests
+        run: ./tests/run-local.sh
+
+      - name: Build release APK
+        run: |
+          ./gradlew assembleRelease \
+            -PversionName="${{ steps.ver.outputs.version_name }}" \
+            -PversionCode=${{ steps.ver.outputs.version_code }} \
+            -PabiFilter=arm64-v8a
+
+      # ── 5. Artifact + prerelease ─────────────────────────────────────────
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release*.apk dist/
+          mv dist/app-release*.apk "dist/dsh-apk-fork-b${{ github.run_number }}.apk"
+          ls -lh dist/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dsh-apk
+          path: dist/*.apk
+
+      - name: Publish as prerelease
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Fork build #${{ github.run_number }}
+          prerelease: true
+          files: dist/*.apk
