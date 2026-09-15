@@ -87,14 +87,31 @@ jobs:
       # ── 2. Proot + libs dos repositórios oficiais do Termux ─────────────
       - name: Package proot runtime (arm64)
         run: |
+          # Resolve os caminhos dos .deb pelo índice APT em vez de pinar
+          # versões: o pool do Termux só mantém o release corrente, então
+          # URL pinada dá 404 (curl exit 22) no primeiro bump upstream
+          # (proot 5.1.107.91 -> .92).
           ABI=aarch64
-          BASE="https://packages.termux.dev/apt/termux-main/pool/main"
+          IDX="https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-${ABI}/Packages"
           mkdir -p /tmp/proot && cd /tmp/proot
-          curl -sfL -o proot.deb "$BASE/p/proot/proot_5.1.107.91_${ABI}.deb"
-          curl -sfL -o talloc.deb "$BASE/libt/libtalloc/libtalloc_2.4.3_${ABI}.deb"
-          curl -sfL -o shmem.deb "$BASE/liba/libandroid-shmem/libandroid-shmem_0.7_${ABI}.deb"
-          mkdir -p x && for d in proot talloc shmem; do
-            ar x $d.deb && tar -xf data.tar.xz -C x && rm -f data.tar.xz
+          curl -sfL "$IDX" -o Packages
+          deb_path() {
+            awk -v pkg="$1" '
+              { sub(/\r$/, "") }
+              $0 == "Package: " pkg { inpkg = 1; next }
+              /^$/                  { inpkg = 0 }
+              inpkg && /^Filename:/  { print $2; exit }
+            ' Packages
+          }
+          BASE="https://packages.termux.dev/apt/termux-main"
+          for pkg in proot libtalloc libandroid-shmem; do
+            path=$(deb_path "$pkg")
+            [ -n "$path" ] || { echo "package $pkg not found in Termux index"; exit 1; }
+            echo "resolved $pkg -> $path"
+            curl -sfL -o "$pkg.deb" "$BASE/$path"
+          done
+          mkdir -p x && for d in proot libtalloc libandroid-shmem; do
+            ar x "$d.deb" && tar -xf data.tar.xz -C x && rm -f data.tar.xz
           done
           P=x/data/data/com.termux/files
           cp "$P/usr/bin/proot" . && cp "$P/usr/lib/libtalloc.so.2" "$P/usr/lib/libandroid-shmem.so" .
