@@ -188,18 +188,25 @@ jobs:
           prerelease: true
           files: dist/*.apk
 
-  # ── 6. Smoke test: o APK precisa ABRIR sem crashar ─────────────────────
-  # Reproduz o "crasha ao tentar abrir" e despeja o stack trace do
-  # AndroidRuntime + o boot log do app (dsh-applog).
-  # Emulador x86_64 com KVM no Linux: o crash reportado é instantâneo
-  # (pré-primeiro-frame), caminho 100% JVM/framework — o app não tem
-  # libs nativas e o proot só executa muito depois da abertura, então
-  # a arquitetura é irrelevante pra reproduzir este crash específico.
+  # ── 6. Smoke test v3: o caminho REAL do primeiro boot do motor ─────────────────────
+  # Não basta "a Activity abriu": o motor precisa extrair 43k entries do
+  # rootfs (1-3 min no emulador) e o smoke antigo (30s) nunca viu isso
+  # completar — os bugs de extração só apareciam no aparelho real.
+  #   FASE 1 — lança o app e MATA o processo no MEIO da extração (deixa
+  #            o rootfs parcial no disco, com symlinks absolutos criados).
+  #   FASE 2 — relança e exige que a RE-EXTRAÇÃO sobre a árvore parcial
+  #            complete com engineReady=true. Reproduz exatamente o bug do
+  #            aparelho: ./etc/alternatives/pager -> /bin/more (alvo absoluto
+  #            que EXISTE no Android) fazia a canonicalização do resolveTarget
+  #            escapar do root — toda re-extração morria com "tar entry
+  #            escapes extraction root", sem recuperação.
+  #   FASE 3 — zero FATAL EXCEPTION, processo vivo, Activity em foco.
+  # Container init NÃO é gate: emulador x86_64 vs proot/rootfs arm64 (a
+  # validação de exec fica para o aparelho real, targetSdk 28).
   # (arm64 no macOS runner não funciona: HVF aninhado indisponível —
   # "HVF error: HV_UNSUPPORTED", run 35037994609 morreu no boot.)
   # Matrix de API: 34 (baseline) e 35 — Android 15, o nível do aparelho
-  # que reportou o crash (OneUI 7). O job FALHA vermelho se o processo
-  # morrer após o launch — o logcat do passo anterior contém a causa.
+  # do usuário (OneUI 7).
   smoke:
     name: Smoke test (API ${{ matrix.api }})
     needs: build
@@ -239,6 +246,15 @@ jobs:
           cd "$GITHUB_WORKSPACE" || exit 1
           # adb no PATH (ubuntu runner) mesmo que a action não exporte.
           export PATH="${ANDROID_HOME:-/usr/local/lib/android/sdk}/platform-tools:$PATH"
+          PKG=com.dshmobile.shell
+          fail() {
+            echo "===== SMOKE FAIL: $1 ====="
+            echo "----- dsh-applog (tail) -----"
+            adb logcat -d -s dsh-applog:I | tail -120 || true
+            echo "----- AndroidRuntime / libc / DEBUG -----"
+            adb logcat -d -s AndroidRuntime:E libc:F DEBUG:F || true
+            exit 1
+          }
           # Busca recursiva: à prova de subdiretório criado pelo download.
           APK=$(find dist -type f -name '*.apk' | head -1)
           if [ -z "$APK" ]; then
@@ -247,36 +263,90 @@ jobs:
             exit 1
           fi
           ls -lh "$APK"
-          adb install -r "$APK" || { echo "===== INSTALL FAILED ====="; exit 1; }
+          adb install -r "$APK" || fail "install failed"
+
+          echo "===== PHASE 1 (API ${{ matrix.api }}): launch, interrupt mid-extraction ====="
           adb logcat -c
-          echo "===== LAUNCH (API ${{ matrix.api }}) ====="
           # am start pode retornar erro se o app crashar durante o launch;
-          # || true garante que o logcat do crash ainda é despejado abaixo.
-          adb shell am start -W -n com.dshmobile.shell/.MainActivity || true
-          PID=""
-          for i in 1 2 3 4 5 6; do
-            sleep 5
-            PID=$(adb shell pidof com.dshmobile.shell | tr -d '\r')
-            echo "===== t=$((i*5))s pid=${PID:-<DEAD>} ====="
-            [ -z "$PID" ] && break
+          # || true garante que o logcat do crash ainda é despejado no fail().
+          adb shell am start -W -n "$PKG/.MainActivity" || true
+          STARTED=""
+          I=0
+          while [ "$I" -lt 45 ]; do
+            if adb logcat -d -s dsh-applog:I | grep -q "write bit stripped"; then
+              STARTED=1
+              break
+            fi
+            PID=$(adb shell pidof "$PKG" | tr -d '\r')
+            [ -z "$PID" ] && fail "process died before extraction started (t=$((I*2))s)"
+            sleep 2
+            I=$((I+1))
           done
-          echo "===== AndroidRuntime (crash stack traces) ====="
-          adb logcat -d -s AndroidRuntime:E libc:F DEBUG:F
-          echo "===== dsh-applog (app boot log) ====="
-          adb logcat -d -s dsh-applog:I
-          echo "===== activity state ====="
-          adb shell dumpsys activity activities 2>/dev/null | grep -iE "ResumedActivity" || true
-          # pidof sozinho dá falso positivo: o watchdog keep-alive é um
-          # serviço STICKY que o Android reinicia sozinho após a morte do
-          # processo (foi o que "passou" o smoke API 35 no run 35042227678
-          # mesmo com a Activity crashada). Portanto: falha também se
-          # QUALQUER FATAL EXCEPTION aparecer na janela monitorada.
+          [ -n "$STARTED" ] || fail "extraction never started within 90s of launch"
+          # ./etc/alternatives/pager (entry #49 do tar) é criado ~1s após o início;
+          # o dsh bin.js (entry #12540 de 42993) só aparece no fim. Matar aqui deixa
+          # a árvore PARCIAL com symlinks absolutos no disco — exatamente o estado
+          # de execução interrompida que fazia toda re-extração morrer com
+          # 'tar entry escapes extraction root'.
+          sleep 2
+          adb shell am force-stop "$PKG"
+          sleep 3
+          PID=$(adb shell pidof "$PKG" | tr -d '\r')
+          [ -z "$PID" ] || fail "force-stop did not kill the process"
+
+          echo "===== PHASE 2: relaunch over the interrupted tree ====="
+          adb logcat -c
+          adb shell am start -W -n "$PKG/.MainActivity" || true
+          STARTED2=""
+          I=0
+          while [ "$I" -lt 30 ]; do
+            if adb logcat -d -s dsh-applog:I | grep -q "boot: extracting rootfs to"; then
+              STARTED2=1
+              break
+            fi
+            PID=$(adb shell pidof "$PKG" | tr -d '\r')
+            [ -z "$PID" ] && fail "process died before re-extraction started (t=$((I*2))s)"
+            sleep 2
+            I=$((I+1))
+          done
+          [ -n "$STARTED2" ] || fail "relaunch did not re-extract (phase-1 kill came after extraction finished — vacuous run, tighten phase-1 timing)"
+          DONE=""
+          I=0
+          while [ "$I" -lt 240 ]; do
+            LOG=$(adb logcat -d -s dsh-applog:I)
+            if echo "$LOG" | grep -q "escapes extraction root"; then
+              fail "re-extraction died on a symlink (resolveTarget regression)"
+            fi
+            if echo "$LOG" | grep -q "boot: extract FAILED"; then
+              fail "re-extraction failed (boot: extract FAILED)"
+            fi
+            if echo "$LOG" | grep -q "engineReady=true"; then
+              DONE=1
+              break
+            fi
+            PID=$(adb shell pidof "$PKG" | tr -d '\r')
+            [ -z "$PID" ] && fail "process died during re-extraction (t=$((I*2))s)"
+            sleep 2
+            I=$((I+1))
+          done
+          [ -n "$DONE" ] || fail "re-extraction did not reach engineReady=true within 8 min"
+          echo "===== PHASE 2 OK: interrupted-tree re-extraction recovered (engineReady=true) ====="
+
+          echo "===== PHASE 3: app health ====="
+          sleep 10
+          # pidof sozinho dá falso positivo (watchdog STICKY reinicia); exigir
+          # também ZERO FATAL EXCEPTION na janela pós-relançamento.
           FATALS=$(adb logcat -d -s AndroidRuntime:E | grep -c "FATAL EXCEPTION" || true)
-          if [ "$FATALS" != "0" ] || [ -z "$PID" ]; then
-            echo "===== APP CRASHED (fatais=$FATALS pid=${PID:-none}) ====="
-            exit 1
+          if [ "$FATALS" != "0" ]; then
+            fail "fatal exceptions in phase-2 window: $FATALS"
           fi
-          echo "app alive (pid=$PID, zero fatal exceptions)"
+          PID=$(adb shell pidof "$PKG" | tr -d '\r')
+          [ -n "$PID" ] || fail "process dead at end"
+          echo "===== ResumedActivity ====="
+          adb shell dumpsys activity activities 2>/dev/null | grep -iE "ResumedActivity" || true
+          echo "===== boot markers (informational; container init pode falhar no x86_64 — proot arm64) ====="
+          adb logcat -d -s dsh-applog:I | grep -E "boot:|extract: done|container" || true
+          echo "SMOKE PASS: re-extraction over an interrupted tree completed, engineReady=true, app alive"
           EOF
           chmod +x "$RUNNER_TEMP/smoke.sh"
           echo "===== smoke.sh gravado: ====="

@@ -39,19 +39,27 @@ class EngineManager(
   val engineReady: Boolean get() = dshEntry.isFile
 
   /**
-   * Extract the bundled rootfs archive into filesDir. Runs on any thread;
-   * callers own the progress UI.
+   * Extract the bundled rootfs archive into filesDir/rootfs. Runs on any
+   * thread; callers own the progress UI.
    * @param onProgress bytesDone, bytesTotal.
    * @returns true on success.
    */
   fun extractRootfs(onProgress: (Long, Long) -> Unit): Boolean =
     try {
+      // The archive IS the rootfs: its entries are ./etc, ./usr, ./root/...
+      // (no rootfs/ prefix — exactly the layout UpdateManager stages and
+      // swaps in as filesDir/rootfs on the online-update path). Extracting it
+      // straight into filesDir scattered the tree across filesDir while
+      // rootfsDir stayed empty: engineReady never turned true (boot
+      // re-extracted on every launch) and proot's -r pointed at an empty
+      // jail. Device-reproduced on the rc.6 snapshot first boot.
+      rootfsDir.mkdirs()
       context.assets.openFd(DshPaths.ROOTFS_ASSET).use { fd ->
-        AppLog.log("extract", "archive size=" + fd.length + " bytes, dest=" + context.filesDir)
+        AppLog.log("extract", "archive size=" + fd.length + " bytes, dest=" + rootfsDir.absolutePath)
         SnapshotExtractor.extract(
           context.assets.open(DshPaths.ROOTFS_ASSET),
           fd.length,
-          context.filesDir,
+          rootfsDir,
           onProgress,
         )
       }

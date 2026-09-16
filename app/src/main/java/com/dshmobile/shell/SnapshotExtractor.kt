@@ -23,7 +23,8 @@ object SnapshotExtractor {
    * Extract an xz-compressed tar stream.
    * @param input raw xz stream.
    * @param totalBytes expected stream size (for progress; 0 = unknown).
-   * @param dest destination root (filesDir; the archive holds usr/ + home/).
+   * @param dest destination root (the rootfs dir; the archive holds the raw
+   *   rootfs tree: etc/, usr/, root/... with no extra prefix).
    * @param onProgress bytesDone, bytesTotal.
    */
   fun extract(
@@ -63,17 +64,26 @@ object SnapshotExtractor {
     onProgress: (Long) -> Unit = {},
   ) {
     val execFiles = mutableListOf<String>()
-    val destCanonical = dest.canonicalPath
     var done = 0L
     var lastReported = 0L
     var entry: TarArchiveEntry? = tar.nextEntry
     while (entry != null) {
       // Traversal guard (I-02): every entry name must resolve inside dest.
-      // Checked per entry before processing (hard links / duplicate entries
-      // cannot bypass it: the target is canonical-path validated).
-      val target = resolveTarget(dest, destCanonical, entry.name)
+      // Checked per entry before processing with a LEXICAL check (see
+      // resolveTarget for why it must never canonicalize) — hard links /
+      // duplicate entries cannot bypass it.
+      val target = resolveTarget(dest, entry.name)
       when {
         entry.isDirectory -> {
+          // Replace a stale non-directory at the target (a symlink or file
+          // left by an older/interrupted run whose snapshot layout differs):
+          // mkdirs would silently fail and every child write would then land
+          // through the stale entry — potentially outside the root.
+          if (java.nio.file.Files.isSymbolicLink(target.toPath()) ||
+            (target.exists() && !target.isDirectory)
+          ) {
+            target.delete()
+          }
           target.mkdirs()
         }
 
@@ -105,7 +115,7 @@ object SnapshotExtractor {
           ) {
             target.delete()
           }
-          val linkTarget = resolveTarget(dest, destCanonical, entry.linkName)
+          val linkTarget = resolveTarget(dest, entry.linkName)
           if (linkTarget.isFile) {
             linkTarget.copyTo(target, overwrite = true)
             target.setExecutable(linkTarget.canExecute(), true)
@@ -120,6 +130,15 @@ object SnapshotExtractor {
 
         else -> {
           target.parentFile?.mkdirs()
+          // Never write THROUGH a stale symlink: the lexical guard above
+          // accepts a pre-existing link at an entry path, and
+          // FileOutputStream would follow an absolute one (e.g. a Debian
+          // alternatives pointer that happens to exist on the host) and create
+          // the file OUTSIDE the extraction root. Replace the link like the
+          // symlink branch does.
+          if (java.nio.file.Files.isSymbolicLink(target.toPath())) {
+            target.delete()
+          }
           // Idempotent overwrite: an existing target may have had its write
           // bit stripped by W^X (reinstall-without-clear, or an interrupted
           // previous run) — restore it before opening the stream, otherwise
@@ -184,18 +203,29 @@ object SnapshotExtractor {
    * Resolve a tar entry name against the extraction root, rejecting any
    * traversal (`..`) or absolute path that would escape dest. Throws on
    * violation: an untrusted snapshot must never write outside its root.
+   *
+   * The check is purely LEXICAL (Path.normalize + component-wise
+   * startsWith) and must never canonicalize: File.getCanonicalPath() resolves
+   * symlinks already on disk, so a re-extraction over a partially extracted
+   * tree died on the first absolute symlink whose target happens to exist
+   * on the host — device-reproduced with Debian's ./etc/alternatives/pager
+   * -> /bin/more (Android ships /bin/more): the entry canonicalized to
+   * /bin/more and every retry failed with "tar entry escapes extraction
+   * root" with no recovery. normalize() collapses "."/".." without touching
+   * the filesystem; startsWith(Path) compares whole components, so a sibling
+   * directory cannot slip under the root by name prefix. Pre-existing
+   * symlinks at entry paths are replaced before use (see write branches).
    */
   private fun resolveTarget(
     dest: File,
-    destCanonical: String,
     name: String,
   ): File {
-    val raw = File(dest, name)
-    val canonical = raw.canonicalPath
-    if (canonical != destCanonical && !canonical.startsWith(destCanonical + File.separator)) {
+    val root = dest.toPath().normalize()
+    val resolved = root.resolve(name).normalize()
+    if (resolved != root && !resolved.startsWith(root)) {
       throw java.io.IOException("tar entry escapes extraction root: " + name)
     }
-    return raw
+    return resolved.toFile()
   }
 
   /** Stamp the Android exec attribute on all extracted executables. */

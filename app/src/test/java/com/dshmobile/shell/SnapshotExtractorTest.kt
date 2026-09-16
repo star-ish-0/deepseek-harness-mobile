@@ -160,6 +160,46 @@ class SnapshotExtractorTest {
   }
 
   @Test
+  fun `re-extraction survives host-resolvable absolute symlinks`() {
+    val dest = tmp.newFolder("j")
+    // Device-reproduced failure: Debian's ./etc/alternatives/pager -> /bin/more
+    // — the absolute target HAPPENS TO EXIST on the host (Android ships
+    // /bin/more), so canonicalizing the entry path on re-extraction resolved
+    // through the stale link to the host path and every retry died with
+    // "tar entry escapes extraction root". The guard must stay lexical, so a
+    // re-extraction over the same tree must succeed and re-create the link.
+    val more = tmp.newFile("host-more")
+    more.writeText("host more")
+    val tarBytes =
+      buildTar(
+        listOf(
+          Triple("etc", "DIR", ByteArray(0)),
+          Triple("etc/alternatives", "DIR", ByteArray(0)),
+          Triple("etc/alternatives/pager", "SYM", more.absolutePath.toByteArray()),
+          Triple("etc/alternatives/README", "", "alt".toByteArray()),
+        ),
+      )
+    extract(tarBytes, dest)
+    val pager = File(dest, "etc/alternatives/pager")
+    assertTrue(
+      java.nio.file.Files
+        .isSymbolicLink(pager.toPath()),
+    )
+    // Regression: second run over the same tree must NOT throw.
+    extract(tarBytes, dest)
+    assertTrue(
+      java.nio.file.Files
+        .isSymbolicLink(pager.toPath()),
+    )
+    assertEquals(
+      more.absolutePath,
+      java.nio.file.Files
+        .readSymbolicLink(pager.toPath()).toString(),
+    )
+    assertEquals("alt", File(dest, "etc/alternatives/README").readText())
+  }
+
+  @Test
   fun `hard link entries are materialized as copies`() {
     val dest = tmp.newFolder("f")
     extract(
