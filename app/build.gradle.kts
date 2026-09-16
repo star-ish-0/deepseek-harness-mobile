@@ -14,14 +14,28 @@ android {
   defaultConfig {
     applicationId = "com.dshmobile.shell"
     minSdk = 26
-    // targetSdk 34: Android 15+ forbids exec of app-data ELF for targetSdk 35+
-    // (covered by the /system/bin/linker64 fallback in startWithArgs); 34 also
-    // keeps the engine's direct exec working on Android 10-14, where the
-    // untrusted_app domain allows exec of app_data_file (AOSP sepolicy).
-    // Huawei/EMUI devices enforce a stricter W^X (executable files must not
-    // be writable) — handled in SnapshotExtractor by stripping the write bit
-    // from extracted executables.
-    targetSdk = 34
+    // targetSdk 28 = the ONLY domain that can exec app-data ELFs.
+    //
+    // AOSP sepolicy (private/seapp_contexts + untrusted_app_27.te): the app's
+    // targetSdkVersion picks its SELinux domain —
+    //   targetSdk >= 29 → untrusted_app (29/30/32 variants): NO execute on
+    //     app_data_file → every exec() under filesDir dies with
+    //     "error=13, Permission denied" on Android 10+ (reproduced on a
+    //     Samsung SM-A075M / Android 15: container init FAILED at proot exec).
+    //   targetSdk <= 28 → untrusted_app_27:
+    //     allow untrusted_app_27 app_data_file:file execute_no_trans;
+    //     → proot, its ptrace children AND every rootfs binary can exec.
+    // This is the same reason Termux still ships targetSdk 28: it is the only
+    // no-Shizuku way to run a proot container from app data on Android 10+.
+    // (The /system/bin/linker64 fallback in EngineManager.startWithArgs only
+    // saves proot's OWN exec — the rootfs children would still be denied —
+    // so it stays as a safety net, not the fix.)
+    // Android 15 still installs targetSdk >= 24 and keeps the untrusted_app_27
+    // domain alive for it; if a future release ever raises the install floor
+    // above 28, the runtime must move to jniLibs/Shizuku.
+    // Huawei/EMUI W^X (executables must not be writable) is handled by the
+    // write-bit strip in SnapshotExtractor/ProotRuntime.
+    targetSdk = 28
     // Version comes from the release tag in CI (-PversionName/-PversionCode,
     // e.g. v0.1.0 -> 0.1.0 / 100); local builds keep the defaults.
     versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
