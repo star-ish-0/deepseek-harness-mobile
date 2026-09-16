@@ -154,10 +154,18 @@ jobs:
           done
           P=x/data/data/com.termux/files
           cp "$P/usr/bin/proot" . && cp "$P/usr/lib/libtalloc.so.2" "$P/usr/lib/libandroid-shmem.so" .
+          # Loaders: Termux proot is built with PROOT_UNBUNDLE_LOADER pointing
+          # at /data/data/com.termux/files/usr/libexec/proot/loader — a path
+          # no other app can traverse (EACCES). Without bundling our own copy
+          # plus the PROOT_LOADER/PROOT_LOADER_32 env overrides, EVERY jailed
+          # exec dies with "execve(...): Permission denied" (device-reproduced
+          # on SM-A075M/Android 15, proot 5.1.107.92).
+          cp "$P/usr/libexec/proot/loader" "$P/usr/libexec/proot/loader32" .
           file proot | grep -q ELF || { echo "proot not ELF"; exit 1; }
+          file loader | grep -q ELF || { echo "proot loader not ELF"; exit 1; }
           readelf --dyn-syms proot | grep -q talloc || { echo "proot missing talloc ref"; exit 1; }
           mkdir -p "$GITHUB_WORKSPACE/app/src/main/assets/proot/arm64-v8a"
-          cp proot libtalloc.so.2 libandroid-shmem.so "$GITHUB_WORKSPACE/app/src/main/assets/proot/arm64-v8a/"
+          cp proot libtalloc.so.2 libandroid-shmem.so loader loader32 "$GITHUB_WORKSPACE/app/src/main/assets/proot/arm64-v8a/"
 
       - name: Build release APK
         run: |
