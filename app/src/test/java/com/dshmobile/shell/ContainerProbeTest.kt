@@ -39,10 +39,16 @@ class ContainerProbeTest {
     // Proot prefix intact up to (and excluding) the container entry.
     assertEquals(engineArgs.take(9), smoke.take(9))
     // Bounded smoke command spliced in: bash + container/hardlink markers.
+    // External commands must use absolute rootfs paths — the probe's bash
+    // inherits the HOST environment (Android PATH), so bare names resolve
+    // to "command not found" inside the jail (device-reproduced build-15).
     assertEquals("/bin/bash", smoke[9])
     assertEquals("-c", smoke[10])
     assertEquals(
-      "echo CONTAINER_OK; id -u; touch .l2s-probe && ln .l2s-probe .l2s-probe-b && echo LINK2SYMLINK_OK; rm -f .l2s-probe .l2s-probe-b",
+      "echo CONTAINER_OK; /usr/bin/id -u; cd /root && printf dsh > l2s-probe.tmp && " +
+        "/usr/bin/ln l2s-probe.tmp l2s-probe.fin && /usr/bin/rm l2s-probe.tmp && " +
+        "/usr/bin/grep -q dsh l2s-probe.fin && echo LINK2SYMLINK_OK; " +
+        "/usr/bin/rm -f l2s-probe.tmp l2s-probe.fin",
       smoke[11],
     )
     assertEquals(12, smoke.size)
@@ -57,7 +63,7 @@ class ContainerProbeTest {
     assertFalse(smoke.contains("/usr/bin/env"))
     assertTrue(
       smoke.first() == "proot" &&
-        smoke.last().endsWith("echo LINK2SYMLINK_OK; rm -f .l2s-probe .l2s-probe-b"),
+        smoke.last().endsWith("/usr/bin/rm -f l2s-probe.tmp l2s-probe.fin"),
     )
   }
 

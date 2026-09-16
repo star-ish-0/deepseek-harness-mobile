@@ -46,6 +46,21 @@ class ContainerProbe(
      * jailed command with rootfs bash. Termux proot has no "--" separator —
      * the command starts at CONTAINER_ENTRY (the first argument not
      * prefixed with "-").
+     *
+     * Every external command must be spelled with its ABSOLUTE rootfs path:
+     * unlike the engine argv (which rebuilds the environment via
+     * `env -i PATH=...`), the probe's bash inherits the HOST environment,
+     * whose PATH lists Android dirs (/system/bin...) that do not exist
+     * inside the jail — device-reproduced on build-15: `id`, `touch`, `ln`
+     * and `rm` all resolved to "command not found" while `echo` (a bash
+     * builtin) worked, so the LINK2SYMLINK_OK gate never fired and container
+     * init failed although the jail itself was healthy.
+     *
+     * The hardlink part reproduces dsh's actual session-commit pattern:
+     * write tmp file → link() tmp onto the final name → unlink() the tmp →
+     * read the final name back. Without --link2symlink the ln step dies with
+     * EACCES (AOSP sepolicy grants apps no file:link on app_data_file),
+     * which is exactly what broke every chat turn on device.
      */
     fun smokeArgsFrom(args: Array<String>): List<String> {
       val cmdAt = args.indexOf(ProotRuntime.CONTAINER_ENTRY)
@@ -53,11 +68,11 @@ class ContainerProbe(
       return args.take(cmdAt).toMutableList().apply {
         add("/bin/bash")
         add("-c")
-        // The ln exercise is the actual regression gate for the SELinux
-        // file:link denial: without emulation, `ln` fails with EACCES inside
-        // the jail exactly like node's fs.link did on device.
         add(
-          "echo CONTAINER_OK; id -u; touch .l2s-probe && ln .l2s-probe .l2s-probe-b && echo LINK2SYMLINK_OK; rm -f .l2s-probe .l2s-probe-b",
+          "echo CONTAINER_OK; /usr/bin/id -u; cd /root && printf dsh > l2s-probe.tmp && " +
+            "/usr/bin/ln l2s-probe.tmp l2s-probe.fin && /usr/bin/rm l2s-probe.tmp && " +
+            "/usr/bin/grep -q dsh l2s-probe.fin && echo LINK2SYMLINK_OK; " +
+            "/usr/bin/rm -f l2s-probe.tmp l2s-probe.fin",
         )
       }
     }
