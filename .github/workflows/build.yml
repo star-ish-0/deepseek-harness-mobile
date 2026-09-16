@@ -183,15 +183,20 @@ jobs:
           files: dist/*.apk
 
   # ── 6. Smoke test: o APK precisa ABRIR sem crashar ─────────────────────
-  # Reproduz o "crasha ao tentar abrir" num emulador arm64 (API 34) e
-  # despeja o stack trace do AndroidRuntime + o boot log do app (dsh-applog).
-  # O job FALHA vermelho se o processo morrer após o launch — o logcat do
-  # passo anterior contém a causa.
+  # Reproduz o "crasha ao tentar abrir" num emulador arm64 e despeja o
+  # stack trace do AndroidRuntime + o boot log do app (dsh-applog).
+  # Matrix de API: 34 (baseline) e 35 — Android 15, o nível do aparelho
+  # que reportou o crash (OneUI 7). O job FALHA vermelho se o processo
+  # morrer após o launch — o logcat do passo anterior contém a causa.
   smoke:
-    name: Smoke test (arm64 emulator, API 34)
+    name: Smoke test (arm64 emulator, API ${{ matrix.api }})
     needs: build
     runs-on: macos-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [34, 35]
     steps:
       - name: Download APK artifact
         uses: actions/download-artifact@v8.0.1
@@ -202,7 +207,7 @@ jobs:
       - name: Boot arm64 emulator and start the app
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          api-level: ${{ matrix.api }}
           arch: arm64-v8a
           target: google_apis
           emulator-boot-timeout: 1800
