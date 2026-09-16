@@ -126,9 +126,13 @@ class ProotRuntimeTest {
     assertTrue("argv must carry the container entry", cmdAt > 0)
     assertEquals(
       "container command must directly follow the last proot option",
-      "--kill-on-exit",
+      "--link2symlink",
       args[cmdAt - 1],
     )
+    // Hardlink emulation must be ON: AOSP sepolicy grants apps no file:link
+    // on app_data_file, so without it every fs.link inside the jail dies
+    // with EACCES (device-reproduced at dsh's session commit).
+    assertTrue(args.contains("--link2symlink"))
   }
 
   @Test

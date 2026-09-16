@@ -87,6 +87,7 @@ class ProotRuntime(
    *  (Termux build) execs the loader for EVERY jailed program start — a missing
    *  loader is not a degraded mode, it is a dead container. */
   fun ensureProot(): Boolean {
+    logHostLinkProbe()
     val talloc = File(prootDir, "libtalloc.so.2")
     val shmem = File(prootDir, "libandroid-shmem.so")
     // All five must be present: a partial extraction (interrupted) that left
@@ -112,6 +113,37 @@ class ProotRuntime(
         "loader=$loaderOk loader32=$loader32Ok",
     )
     return ok && tallocOk && shmemOk && loaderOk && loader32Ok
+  }
+
+  /**
+   * Diagnostic only: can THIS app create a real hardlink inside its own data
+   * directory? AOSP sepolicy grants apps create/rename/setattr/unlink/rw on
+   * app_data_file but conspicuously NOT file:link, so link(2) returns EACCES
+   * for every Android app while every other file op succeeds
+   * (device-reproduced: dsh's session commit — tmp + fs.link + unlink — fails
+   * at the link step with EACCES on SM-A075M/Android 15). Purely informational:
+   * the container relies on proot --link2symlink instead; this line exists so
+   * the next device log carries ground truth about the host filesystem.
+   */
+  private fun logHostLinkProbe() {
+    try {
+      val a = File(prootDir, "link-probe-a")
+      val b = File(prootDir, "link-probe-b")
+      prootDir.mkdirs()
+      a.writeText("probe")
+      b.delete()
+      var result = "ok"
+      try {
+        android.system.Os.link(a.absolutePath, b.absolutePath)
+      } catch (e: Throwable) {
+        result = "denied (" + (e.message ?: e.javaClass.simpleName) + ")"
+      }
+      a.delete()
+      b.delete()
+      AppLog.log("proot", "host hardlink probe: $result")
+    } catch (_: Throwable) {
+      // Never let a diagnostic break the boot.
+    }
   }
 
   /**
@@ -146,6 +178,17 @@ class ProotRuntime(
         "-w",
         "/root",
         "--kill-on-exit",
+        // Hardlink emulation: AOSP sepolicy gives apps NO file:link on
+        // app_data_file (create_file_perms = create/rename/setattr/unlink/rw),
+        // so every link(2) under the jail dies with EACCES — dsh commits
+        // sessions atomically as tmp + fs.link + unlink and node's fs.link
+        // failed exactly there on device while every other file op worked.
+        // link2symlink (Termux's own answer to hardlink-less filesystems)
+        // converts link(a,b) into: rename a to a hidden .l2s.* backing file,
+        // then symlink both names to it; the following unlink(a) only
+        // decrements the backing's link count, so the commit pattern survives
+        // and the final file stays readable through its symlink.
+        "--link2symlink",
         // No "--" separator: Termux proot rejects it ("unknown option '--'")
         // and ends its own option parsing at the first argument that does
         // not start with "-" — /usr/bin/env is already the command start.

@@ -38,21 +38,27 @@ class ContainerProbeTest {
     val smoke = ContainerProbe.smokeArgsFrom(engineArgs)
     // Proot prefix intact up to (and excluding) the container entry.
     assertEquals(engineArgs.take(9), smoke.take(9))
-    // Bounded smoke command spliced in.
+    // Bounded smoke command spliced in: bash + container/hardlink markers.
     assertEquals("/bin/bash", smoke[9])
     assertEquals("-c", smoke[10])
-    assertEquals("echo CONTAINER_OK; id -u", smoke[11])
+    assertEquals(
+      "echo CONTAINER_OK; id -u; touch .l2s-probe && ln .l2s-probe .l2s-probe-b && echo LINK2SYMLINK_OK; rm -f .l2s-probe .l2s-probe-b",
+      smoke[11],
+    )
     assertEquals(12, smoke.size)
   }
 
   @Test
   fun `smoke argv never carries a double-dash separator`() {
     val engineArgs =
-      arrayOf("proot", "-r", "/rootfs", "--kill-on-exit", "/usr/bin/env", "-i", "HOME=/root")
+      arrayOf("proot", "-r", "/rootfs", "--kill-on-exit", "--link2symlink", "/usr/bin/env", "-i", "HOME=/root")
     val smoke = ContainerProbe.smokeArgsFrom(engineArgs)
     assertFalse(smoke.contains("--"))
     assertFalse(smoke.contains("/usr/bin/env"))
-    assertTrue(smoke.first() == "proot" && smoke.last() == "echo CONTAINER_OK; id -u")
+    assertTrue(
+      smoke.first() == "proot" &&
+        smoke.last().endsWith("echo LINK2SYMLINK_OK; rm -f .l2s-probe .l2s-probe-b"),
+    )
   }
 
   @Test(expected = IllegalArgumentException::class)
