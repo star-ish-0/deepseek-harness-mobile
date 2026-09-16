@@ -18,6 +18,15 @@ class ProotRuntime(
   val prootDir: File get() = File(context.filesDir, "proot")
   val prootBin: File get() = File(prootDir, "proot")
 
+  companion object {
+    /** Container entry executable. Doubles as the argv marker where proot
+     *  options end and the jailed command begins — Termux proot's parser has
+     *  NO "--" separator: it aborts with `unknown option '--'` (verified in
+     *  termux/proot src/cli/cli.c, device-reproduced with 5.1.107). The
+     *  command simply starts at the first argument not prefixed with "-". */
+    const val CONTAINER_ENTRY = "/usr/bin/env"
+  }
+
   fun resolvConf(): File {
     val f = File(context.filesDir, "etc/resolv.conf")
     if (!f.isFile) {
@@ -107,8 +116,10 @@ class ProotRuntime(
         "-w",
         "/root",
         "--kill-on-exit",
-        "--",
-        "/usr/bin/env",
+        // No "--" separator: Termux proot rejects it ("unknown option '--'")
+        // and ends its own option parsing at the first argument that does
+        // not start with "-" — /usr/bin/env is already the command start.
+        CONTAINER_ENTRY,
         "-i",
         "HOME=/root",
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

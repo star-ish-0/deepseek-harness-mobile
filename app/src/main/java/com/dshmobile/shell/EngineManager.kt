@@ -104,6 +104,13 @@ class EngineManager(
   fun ensureDshDataHome(): File {
     val dshData = dshDataDir
     val privateDsh = File(rootfsDir, DshPaths.CONTAINER_DSH_HOME)
+    // The /root/projects bind source must exist BEFORE buildEngineArgs runs:
+    // proot canonicalizes bindings at startup and a missing source emits
+    // "can't sanitize binding ... No such file or directory" — the workspace
+    // then lands inside the rootfs instead of the host-backed dshdata
+    // (device-reproduced when the container probe ran before any start).
+    // Every caller of this method derives the projects dir from its result.
+    File(privateDsh, DshPaths.PROJECTS_DIR).mkdirs()
     // Android < 11 has no All Files Access model and the public Documents
     // directory is unwritable (scoped storage); migration is impossible, so
     // keep DSH_HOME fully private. Observed on Android 10 (Huawei): the

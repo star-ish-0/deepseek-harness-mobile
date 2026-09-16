@@ -18,20 +18,8 @@ class ContainerProbe(
   fun smokeTest(): String? =
     try {
       val (args, env) = prootRuntime.buildEngineArgs(rootfsDir, projectsDir, 3080, pickToken)
-      // Keep the proot prefix, swap everything after "--" for a bounded
-      // smoke command: rootfs bash must answer (container is real).
-      val sep = args.indexOf("--")
-      val smokeArgs =
-        args
-          .take(sep + 1)
-          .toMutableList()
-          .apply {
-            add("/bin/bash")
-            add("-c")
-            add("echo CONTAINER_OK; id -u")
-          }
       val pb =
-        ProcessBuilder(smokeArgs).also { b ->
+        ProcessBuilder(smokeArgsFrom(args)).also { b ->
           b.environment().putAll(env)
           b.redirectErrorStream(true)
         }
@@ -46,4 +34,22 @@ class ContainerProbe(
     } catch (t: Throwable) {
       (t.message ?: t.javaClass.simpleName).take(600)
     }
+
+  companion object {
+    /**
+     * Splice a bounded smoke command into an engine argv: keep the proot
+     * prefix (options + bindings) and replace the jailed command with
+     * rootfs bash. Termux proot has no "--" separator — the command starts
+     * at CONTAINER_ENTRY (the first argument not prefixed with "-").
+     */
+    fun smokeArgsFrom(args: Array<String>): List<String> {
+      val cmdAt = args.indexOf(ProotRuntime.CONTAINER_ENTRY)
+      require(cmdAt > 0) { "engine argv carries no " + ProotRuntime.CONTAINER_ENTRY + " entry" }
+      return args.take(cmdAt).toMutableList().apply {
+        add("/bin/bash")
+        add("-c")
+        add("echo CONTAINER_OK; id -u")
+      }
+    }
+  }
 }

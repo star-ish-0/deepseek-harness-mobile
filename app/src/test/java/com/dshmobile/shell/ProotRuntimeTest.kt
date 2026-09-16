@@ -86,6 +86,18 @@ class ProotRuntimeTest {
     assertTrue(joined.contains("/usr/bin/env"))
     assertTrue(joined.contains("-i"))
     assertTrue(env.getValue("LD_LIBRARY_PATH").isNotEmpty())
+    // Termux proot compatibility (device-reproduced "unknown option '--'"
+    // with proot 5.1.107): NO double-dash separator anywhere; the jailed
+    // command starts directly at the entry executable, right after the last
+    // proot option.
+    assertFalse(args.contains("--"))
+    val cmdAt = args.indexOf(ProotRuntime.CONTAINER_ENTRY)
+    assertTrue("argv must carry the container entry", cmdAt > 0)
+    assertEquals(
+      "container command must directly follow the last proot option",
+      "--kill-on-exit",
+      args[cmdAt - 1],
+    )
   }
 
   @Test
