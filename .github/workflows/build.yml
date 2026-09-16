@@ -13,9 +13,10 @@
 #      NÃO existem no ambiente JVM (Robolectric serve src/main/assets).
 #   5. Monta o APK release assinado e publica como prerelease no SEU fork
 #      — dá pra baixar direto do celular pela aba Releases.
-#   6. SMOKE TEST: abre o APK num emulador arm64 (API 34) e despeja o
-#      logcat (crash + boot log do app). O job falha se o app morrer
-#      na abertura — é ele que diagnostica "crasha ao abrir".
+#   6. SMOKE TEST: abre o APK em emuladores x86_64/KVM (API 34 e 35 —
+#      35 = Android 15, o nível do aparelho que está crashando) e
+#      despeja o logcat (crash + boot log do app). O job falha se o
+#      app morrer na abertura — é ele que diagnostica "crasha ao abrir".
 #
 # ⚠️ Consequência da chave efêmera: cada build tem uma assinatura diferente.
 #    Pra instalar um build novo sobre um antigo, DESINSTALE o anterior
@@ -225,6 +226,54 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # ⚠️ O android-emulator-runner divide o input `script:` em LINHAS e
+      # executa cada uma num `sh -c` separado (fonte: script-parser.ts da
+      # action). if/fi, for e variáveis entre linhas são impossíveis lá
+      # (run 35041272494: "Syntax error: end of file unexpected (expecting
+      # fi)"). Solução: gravar o script num arquivo e invocá-lo em UMA linha.
+      - name: Write smoke test script
+        run: |
+          cat > "$RUNNER_TEMP/smoke.sh" <<'EOF'
+          #!/bin/sh
+          set -x
+          cd "$GITHUB_WORKSPACE" || exit 1
+          # adb no PATH (ubuntu runner) mesmo que a action não exporte.
+          export PATH="${ANDROID_HOME:-/usr/local/lib/android/sdk}/platform-tools:$PATH"
+          # Busca recursiva: à prova de subdiretório criado pelo download.
+          APK=$(find dist -type f -name '*.apk' | head -1)
+          if [ -z "$APK" ]; then
+            echo "===== NO APK UNDER dist — conteúdo atual: ====="
+            ls -laR dist || true
+            exit 1
+          fi
+          ls -lh "$APK"
+          adb install -r "$APK" || { echo "===== INSTALL FAILED ====="; exit 1; }
+          adb logcat -c
+          echo "===== LAUNCH (API ${{ matrix.api }}) ====="
+          # am start pode retornar erro se o app crashar durante o launch;
+          # || true garante que o logcat do crash ainda é despejado abaixo.
+          adb shell am start -W -n com.dshmobile.shell/.MainActivity || true
+          PID=""
+          for i in 1 2 3 4 5 6; do
+            sleep 5
+            PID=$(adb shell pidof com.dshmobile.shell | tr -d '\r')
+            echo "===== t=$((i*5))s pid=${PID:-<DEAD>} ====="
+            [ -z "$PID" ] && break
+          done
+          echo "===== AndroidRuntime (crash stack traces) ====="
+          adb logcat -d -s AndroidRuntime:E libc:F DEBUG:F
+          echo "===== dsh-applog (app boot log) ====="
+          adb logcat -d -s dsh-applog:I
+          if [ -z "$PID" ]; then
+            echo "===== APP PROCESS DEAD — crash reproduzido ====="
+            exit 1
+          fi
+          echo "app alive (pid=$PID)"
+          EOF
+          chmod +x "$RUNNER_TEMP/smoke.sh"
+          echo "===== smoke.sh gravado: ====="
+          cat "$RUNNER_TEMP/smoke.sh"
+
       - name: Boot emulator and start the app
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -236,35 +285,5 @@ jobs:
           cores: 4
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: |
-            set -x
-            # Busca recursiva: à prova de subdiretório criado pelo download.
-            APK=$(find dist -type f -name '*.apk' | head -1)
-            if [ -z "$APK" ]; then
-              echo "===== NO APK UNDER dist — conteúdo atual: ====="
-              ls -laR dist || true
-              exit 1
-            fi
-            ls -lh "$APK"
-            adb install -r "$APK" || { echo "===== INSTALL FAILED ====="; exit 1; }
-            adb logcat -c
-            echo "===== LAUNCH (API ${{ matrix.api }}) ====="
-            # am start pode retornar erro se o app crashar durante o launch;
-            # || true garante que o logcat do crash ainda é despejado abaixo.
-            adb shell am start -W -n com.dshmobile.shell/.MainActivity || true
-            PID=""
-            for i in 1 2 3 4 5 6; do
-              sleep 5
-              PID=$(adb shell pidof com.dshmobile.shell | tr -d '\r')
-              echo "===== t=$((i*5))s pid=${PID:-<DEAD>} ====="
-              [ -z "$PID" ] && break
-            done
-            echo "===== AndroidRuntime (crash stack traces) ====="
-            adb logcat -d -s AndroidRuntime:E libc:F DEBUG:F
-            echo "===== dsh-applog (app boot log) ====="
-            adb logcat -d -s dsh-applog:I
-            if [ -z "$PID" ]; then
-              echo "===== APP PROCESS DEAD — crash reproduzido ====="
-              exit 1
-            fi
-            echo "app alive (pid=$PID)"
+          # Uma ÚNICA linha — o script real mora no arquivo gravado acima.
+          script: sh "$RUNNER_TEMP/smoke.sh"
