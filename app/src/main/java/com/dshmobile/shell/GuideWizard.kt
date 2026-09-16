@@ -669,9 +669,23 @@ class GuideWizard(
         visibility = View.GONE
       }
     backButton = back
-    (update.layoutParams as LinearLayout.LayoutParams).bottomMargin = sep
-    (reload.layoutParams as LinearLayout.LayoutParams).bottomMargin = sep
-    (keepAlive.layoutParams as LinearLayout.LayoutParams).bottomMargin = sep
+    // Ghosts are created in code (no XML, no parent yet), so their
+    // layoutParams are NULL until addView() generates defaults — the old
+    // blind cast crashed EVERY cold start with an NPE at MainActivity
+    // onCreate (reproduced on emulators API 34 and 35). Set explicit
+    // params instead: MATCH_PARENT × WRAP_CONTENT is exactly what the
+    // vertical LinearLayout parents below would generate, plus the row
+    // spacing the cast was trying to inject.
+    fun withRowSpacing(button: Button) {
+      button.layoutParams =
+        LinearLayout.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT,
+          ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { bottomMargin = sep }
+    }
+    withRowSpacing(update)
+    withRowSpacing(reload)
+    withRowSpacing(keepAlive)
     val left =
       LinearLayout(activity).apply {
         orientation = LinearLayout.VERTICAL

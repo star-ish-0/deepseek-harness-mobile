@@ -264,11 +264,19 @@ jobs:
           adb logcat -d -s AndroidRuntime:E libc:F DEBUG:F
           echo "===== dsh-applog (app boot log) ====="
           adb logcat -d -s dsh-applog:I
-          if [ -z "$PID" ]; then
-            echo "===== APP PROCESS DEAD — crash reproduzido ====="
+          echo "===== activity state ====="
+          adb shell dumpsys activity activities 2>/dev/null | grep -iE "ResumedActivity" || true
+          # pidof sozinho dá falso positivo: o watchdog keep-alive é um
+          # serviço STICKY que o Android reinicia sozinho após a morte do
+          # processo (foi o que "passou" o smoke API 35 no run 35042227678
+          # mesmo com a Activity crashada). Portanto: falha também se
+          # QUALQUER FATAL EXCEPTION aparecer na janela monitorada.
+          FATALS=$(adb logcat -d -s AndroidRuntime:E | grep -c "FATAL EXCEPTION" || true)
+          if [ "$FATALS" != "0" ] || [ -z "$PID" ]; then
+            echo "===== APP CRASHED (fatais=$FATALS pid=${PID:-none}) ====="
             exit 1
           fi
-          echo "app alive (pid=$PID)"
+          echo "app alive (pid=$PID, zero fatal exceptions)"
           EOF
           chmod +x "$RUNNER_TEMP/smoke.sh"
           echo "===== smoke.sh gravado: ====="
