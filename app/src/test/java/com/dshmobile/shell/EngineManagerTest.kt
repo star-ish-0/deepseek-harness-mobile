@@ -103,13 +103,17 @@ class EngineManagerTest {
     // Cooldown long expired (last attempt a day ago) -> the process is hung.
     EngineManager.lastStartAttemptAt = System.currentTimeMillis() - 24 * 3600 * 1000L
     // Seed the proot runtime so startEngine passes the gate and reaches the
-    // hung-process kill path before failing on the missing rootfs.
+    // hung-process kill path before failing on the missing rootfs. All five
+    // files are mandatory since the loaders joined the runtime (a Termux
+    // proot without its loader cannot exec anything inside the jail).
     File(context.filesDir, "proot/proot").apply {
       parentFile!!.mkdirs()
       writeText("stub")
     }
     File(context.filesDir, "proot/libtalloc.so.2").writeText("stub")
     File(context.filesDir, "proot/libandroid-shmem.so").writeText("stub")
+    File(context.filesDir, "proot/loader").writeText("stub")
+    File(context.filesDir, "proot/loader32").writeText("stub")
 
     val result = EngineManager(context).startEngine()
 
@@ -124,13 +128,15 @@ class EngineManagerTest {
   fun `concurrent starts are single-flighted`() {
     val second = EngineManager(context)
     // Self-contained: seed the proot runtime like the hung-process test does
-    // (Robolectric resets filesDir per test).
+    // (Robolectric resets filesDir per test; all five files required).
     File(context.filesDir, "proot/proot").apply {
       parentFile!!.mkdirs()
       writeText("stub")
     }
     File(context.filesDir, "proot/libtalloc.so.2").writeText("stub")
     File(context.filesDir, "proot/libandroid-shmem.so").writeText("stub")
+    File(context.filesDir, "proot/loader").writeText("stub")
+    File(context.filesDir, "proot/loader32").writeText("stub")
     // Both try to acquire the CAS; only one can hold it at a time.
     assertTrue(EngineManager.STARTING.compareAndSet(false, true))
     // The second caller must not start (returns true = "deferred/ignored").
