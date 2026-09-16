@@ -214,6 +214,9 @@ jobs:
         with:
           name: dsh-apk
           path: dist
+          # Sem isto o v8 extrai em dist/<artifact-name>/... e o glob
+          # dist/*.apk abaixo não acha nada (falso 'crash' no run 35040638141).
+          merge-multiple: true
 
       # KVM no ubuntu runner: boot do emulador x86_64 em ~3 min.
       - name: Enable KVM device access
@@ -235,7 +238,13 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: |
             set -x
-            APK=$(ls dist/*.apk | head -1)
+            # Busca recursiva: à prova de subdiretório criado pelo download.
+            APK=$(find dist -type f -name '*.apk' | head -1)
+            if [ -z "$APK" ]; then
+              echo "===== NO APK UNDER dist — conteúdo atual: ====="
+              ls -laR dist || true
+              exit 1
+            fi
             ls -lh "$APK"
             adb install -r "$APK" || { echo "===== INSTALL FAILED ====="; exit 1; }
             adb logcat -c
